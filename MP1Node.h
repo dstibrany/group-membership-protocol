@@ -31,6 +31,7 @@
 enum MsgTypes{
     JOINREQ,
     JOINREP,
+    GOSSIP,
     DUMMYLASTMSGTYPE
 };
 
@@ -42,6 +43,11 @@ enum MsgTypes{
 typedef struct MessageHdr {
 	enum MsgTypes msgType;
 }MessageHdr;
+
+typedef struct MessageHdr2 {
+	enum MsgTypes msgType;
+	int numEntries;
+}MessageHdr2;
 
 /**
  * CLASS NAME: MP1Node
@@ -75,6 +81,7 @@ public:
 	Address getJoinAddress();
 	void initMemberListTable(Member *memberNode);
 	void printAddress(Address *addr);
+	void addSelfToGroup();
 	virtual ~MP1Node();
 };
 
