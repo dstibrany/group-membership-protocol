@@ -145,12 +145,10 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr) {
 
         // send JOINREQ message to introducer member
         emulNet->ENsend(&memberNode->addr, joinaddr, (char *)msg, msgsize);
-
         free(msg);
     }
 
     return 1;
-
 }
 
 /**
@@ -162,6 +160,7 @@ int MP1Node::finishUpThisNode(){
    /*
     * Your code goes here
     */
+    return 0;
 }
 
 /**
@@ -227,28 +226,33 @@ bool MP1Node::recvCallBack(void *env, char *data, int size) {
 #endif
 
         // send JOINREP
-        MessageHdr2 *repmsg;
-        size_t msgsize = sizeof(MessageHdr) + sizeof(long) + 1;
-        repmsg = (MessageHdr *) malloc(msgsize * sizeof(char));
-
-        repmsg->msgType = JOINREP;
-        memcpy((char *)(repmsg+1), &memberNode->heartbeat, sizeof(long));
-
-        // send JOINREP response to joining node
+        GossipMsgHdr *repmsg;
+        size_t msgsize = createGossipMessage(JOINREP, &repmsg);
         emulNet->ENsend(&memberNode->addr, joiningAddr, (char *)repmsg, msgsize);
-
         free(repmsg);
     }
     else if (msg->msgType == JOINREP) {
+
+#ifdef DEBUGLOG
         log->LOG(&memberNode->addr, "Received JOINREP");
+#endif
+        GossipMsgHdr *joinmsg = (GossipMsgHdr *) data;
+        vector<MemberListEntry> newMemberList;
+        unpackMessage(joinmsg, &newMemberList);
         addSelfToGroup();
+        mergeLists(&newMemberList);
     }
 
     else if (msg->msgType == GOSSIP) {
-        MessageHdr2 *gossipmsg = (MessageHdr2 *) data;
-        printAddress(&memberNode->addr);
-        printf("---%d\n", gossipmsg->numEntries);
+#ifdef DEBUGLOG
+        log->LOG(&memberNode->addr, "Received GOSSIP");
+#endif
+        GossipMsgHdr *gossipmsg = (GossipMsgHdr *) data;
+        // printAddress(&memberNode->addr);
+        // printf("---%d\n", gossipmsg->numEntries);
     }
+
+    return true;
  }
 
 /**
@@ -260,33 +264,32 @@ bool MP1Node::recvCallBack(void *env, char *data, int size) {
  */
 void MP1Node::nodeLoopOps() {
     // check for failed nodes
-
     // propagate list
     // - pick k random nodes
-    int randNum = rand() % (max - 0 + 1) + 0;
+    // int randNum = rand() % (max - 0 + 1) + 0;
     // - increase heartbeat of self
     memberNode->heartbeat++;
-    memberNode->myPos->setheartbeat(memberNode->heartbeat);
+    memberNode->memberList[0].setheartbeat(memberNode->heartbeat);
     // - send membership list 
-    vector<MemberListEntry> memberList = memberNode->memberList;
-    size_t msgheadersize = sizeof(MessageHdr2);
-    size_t msgsize = msgheadersize + (sizeof(MemberListEntry) * memberList.size()) + 1;
-    MessageHdr2 *msg = (MessageHdr2 *) malloc(msgsize * sizeof(char));
-    msg->msgType = GOSSIP;
-    msg->numEntries = memberList.size();
-    for (int i = 0; i < memberList.size(); i++) {
-        memcpy((char *)(msg+msgheadersize) + (i * sizeof(MemberListEntry)), &memberList[i], sizeof(MemberListEntry));
-    }
-
-    MemberListEntry randomNode = memberList[0];
-
-    Address *toAddr = new Address(to_string(randomNode.getid()) + ":" + to_string(randomNode.getport()));
-
+    GossipMsgHdr *gossip_msg;
+    size_t msgsize = createGossipMessage(GOSSIP, &gossip_msg);
+    if (memberNode->memberList.size() <= 1) return;
+    // printAddress(&memberNode->addr);
+    // printf("id==%d\n", memberNode->memberList[0].getid());
+    // printf("id==%d\n", memberNode->memberList[1].getid());
+    // printf("port==%d\n", memberNode->memberList[0].getport());
+    // printf("port==%d\n", memberNode->memberList[1].getport());
+    MemberListEntry randomNode = memberNode->memberList[1];
+    string s = to_string(randomNode.getid()) + ":" + to_string(randomNode.getport());
+    Address *toAddr = new Address(s);
     // TODO gossip to k random nodes
-    emulNet->ENsend(&memberNode->addr, toAddr, (char *)msg, msgsize);
+#ifdef DEBUGLOG
+    log->LOG(&memberNode->addr, "Sending GOSSIP");
+#endif
 
+    emulNet->ENsend(&memberNode->addr, toAddr, (char *)gossip_msg, msgsize);
     delete toAddr;
-
+    free(gossip_msg);
     return;
 }
 
@@ -348,3 +351,61 @@ void MP1Node::addSelfToGroup()
     memberNode->memberList.push_back(MemberListEntry(id, port, memberNode->heartbeat, par->getcurrtime()));
     memberNode->myPos = memberNode->memberList.begin();
 }
+
+size_t MP1Node::createGossipMessage(enum MsgTypes msgType, GossipMsgHdr **msg) {
+    vector<MemberListEntry> memberList = memberNode->memberList;
+
+    size_t msgheadersize = sizeof(GossipMsgHdr);
+    size_t msgsize = msgheadersize + (sizeof(MemberListEntry) * memberList.size()) + 1;
+    *msg = (GossipMsgHdr *) malloc(msgsize * sizeof(char));
+
+    (*msg)->msgType = msgType;
+    (*msg)->numEntries = memberList.size();
+
+    MemberListEntry m = memberList[0];
+
+    for (int i = 0; i < memberList.size(); i++) {
+        memcpy((char *)*msg + msgheadersize + (i * sizeof(MemberListEntry)), &memberList[i], sizeof(MemberListEntry));
+    }
+
+    return msgsize;
+}
+
+void MP1Node::unpackMessage(GossipMsgHdr *gossipMessage, vector<MemberListEntry> *newMemberList) {
+    int numEntries = gossipMessage->numEntries;
+    int id;
+    short port;
+    long heartbeat;
+    char *temp_address;
+
+    for (int i = 0; i < numEntries; i++) {
+        temp_address = (char *)gossipMessage + sizeof(GossipMsgHdr) + (i * sizeof(MemberListEntry));
+        memcpy(&id, temp_address, sizeof(int));
+        memcpy(&port, temp_address + sizeof(int), sizeof(short));
+        memcpy(&heartbeat, temp_address + sizeof(int) + sizeof(int), sizeof(long));
+        (*newMemberList).push_back(MemberListEntry(id, port, heartbeat, 0));
+    }
+}
+
+void MP1Node::mergeLists(vector<MemberListEntry> *newMemberList) {
+    // for each entry in new list
+    for (int i = 0; i < newMemberList->size(); i++) {
+        for (int j = 0; j < memberNode->memberList.size(); j++) {
+            // if we do have entry, check if new heartbeat > our heartbeat, 
+            // in which case we should update our entry 
+            if (memberNode->memberList[j].id == (*newMemberList)[i].id && memberNode->memberList[j].port == (*newMemberList)[i].port) {
+                if ((*newMemberList)[i].heartbeat > memberNode->memberList[j].heartbeat) {
+                    memberNode->memberList[j].heartbeat = (*newMemberList)[i].heartbeat; 
+                }
+                break;
+            }
+        }
+        // we don't have the entry, so add it
+        memberNode->memberList.push_back((*newMemberList)[i]);
+        memberNode->memberList.back().settimestamp(par->getcurrtime());
+    }
+}
+
+
+
+
