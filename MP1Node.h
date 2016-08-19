@@ -14,12 +14,13 @@
 #include "Member.h"
 #include "EmulNet.h"
 #include "Queue.h"
+#include <random>
 
 /**
  * Macros
  */
 #define TREMOVE 20
-#define TFAIL 5
+#define TFAIL 5 
 
 /*
  * Note: You can change/add any functions in MP1Node.{h,cpp}
@@ -82,9 +83,11 @@ public:
     void initMemberListTable(Member *memberNode);
     void printAddress(Address *addr);
     void addSelfToGroup();
-    size_t createGossipMessage(enum MsgTypes msgType, GossipMsgHdr **msg);
+    int createGossipMessage(enum MsgTypes msgType, GossipMsgHdr **msg);
     void unpackMessage(GossipMsgHdr *gossipMessage, vector<MemberListEntry> *newMemberList);
     void mergeLists(vector<MemberListEntry> *newMemberList);
+    Address createAddress(MemberListEntry &m);
+    bool hasFailed(const MemberListEntry &m);
     virtual ~MP1Node();
 };
 

@@ -213,7 +213,6 @@ void MP1Node::checkMessages() {
  * DESCRIPTION: Message handler for different message types
  */
 bool MP1Node::recvCallBack(void *env, char *data, int size) {
-    // TODO: seperate into functions
     MessageHdr *msg = (MessageHdr *) data;
 
     // JOINREQ 
@@ -221,35 +220,26 @@ bool MP1Node::recvCallBack(void *env, char *data, int size) {
         Address *joiningAddr = (Address *) malloc(sizeof(Address));
         memcpy(&joiningAddr->addr, ((char *)msg) + sizeof(MessageHdr), sizeof(joiningAddr->addr));
 
-#ifdef DEBUGLOG
-        log->logNodeAdd(&memberNode->addr, joiningAddr);
-#endif
-
         // send JOINREP
         GossipMsgHdr *repmsg;
-        size_t msgsize = createGossipMessage(JOINREP, &repmsg);
+        int msgsize = createGossipMessage(JOINREP, &repmsg);
         emulNet->ENsend(&memberNode->addr, joiningAddr, (char *)repmsg, msgsize);
         free(repmsg);
     }
+    // JOINREP
     else if (msg->msgType == JOINREP) {
-
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Received JOINREP");
-#endif
         GossipMsgHdr *joinmsg = (GossipMsgHdr *) data;
         vector<MemberListEntry> newMemberList;
         unpackMessage(joinmsg, &newMemberList);
         addSelfToGroup();
         mergeLists(&newMemberList);
     }
-
+    // GOSSIP
     else if (msg->msgType == GOSSIP) {
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Received GOSSIP");
-#endif
         GossipMsgHdr *gossipmsg = (GossipMsgHdr *) data;
-        // printAddress(&memberNode->addr);
-        // printf("---%d\n", gossipmsg->numEntries);
+        vector<MemberListEntry> newMemberList;
+        unpackMessage(gossipmsg, &newMemberList);
+        mergeLists(&newMemberList);
     }
 
     return true;
@@ -263,33 +253,43 @@ bool MP1Node::recvCallBack(void *env, char *data, int size) {
  *              Propagate your membership list
  */
 void MP1Node::nodeLoopOps() {
+    int k = 2;
+
+    if (memberNode->nnb == 0) return;
+
     // check for failed nodes
-    // propagate list
-    // - pick k random nodes
-    // int randNum = rand() % (max - 0 + 1) + 0;
-    // - increase heartbeat of self
+    for (int i = memberNode->nnb; i >= 1; i--) {
+        // no heartbeat for TFAIL + TREMOVE seconds - we remove the node here
+        if (par->globaltime - memberNode->memberList[i].timestamp > (TFAIL + TREMOVE)) {
+            Address toAddr = createAddress(memberNode->memberList[i]);
+            memberNode->memberList.erase(memberNode->memberList.begin() + i);
+            memberNode->nnb--;
+
+    #ifdef DEBUGLOG
+            log->logNodeRemove(&memberNode->addr, &toAddr);
+    #endif
+        }
+    }
+
+    // increase heartbeat of self
     memberNode->heartbeat++;
     memberNode->memberList[0].setheartbeat(memberNode->heartbeat);
-    // - send membership list 
+    
+    // send membership list 
     GossipMsgHdr *gossip_msg;
-    size_t msgsize = createGossipMessage(GOSSIP, &gossip_msg);
-    if (memberNode->memberList.size() <= 1) return;
-    // printAddress(&memberNode->addr);
-    // printf("id==%d\n", memberNode->memberList[0].getid());
-    // printf("id==%d\n", memberNode->memberList[1].getid());
-    // printf("port==%d\n", memberNode->memberList[0].getport());
-    // printf("port==%d\n", memberNode->memberList[1].getport());
-    MemberListEntry randomNode = memberNode->memberList[1];
-    string s = to_string(randomNode.getid()) + ":" + to_string(randomNode.getport());
-    Address *toAddr = new Address(s);
-    // TODO gossip to k random nodes
-#ifdef DEBUGLOG
-    log->LOG(&memberNode->addr, "Sending GOSSIP");
-#endif
 
-    emulNet->ENsend(&memberNode->addr, toAddr, (char *)gossip_msg, msgsize);
-    delete toAddr;
+    int msgsize = createGossipMessage(GOSSIP, &gossip_msg);
+
+    // gossip to k random nodes
+    for (int i = 0; i < k; i++) {
+        int n = (rand() % memberNode->nnb) + 1;
+        MemberListEntry randomNode = memberNode->memberList[n];
+        Address toAddr = createAddress(randomNode);
+        emulNet->ENsend(&memberNode->addr, &toAddr, (char *)gossip_msg, msgsize);
+    }
+
     free(gossip_msg);
+
     return;
 }
 
@@ -352,21 +352,24 @@ void MP1Node::addSelfToGroup()
     memberNode->myPos = memberNode->memberList.begin();
 }
 
-size_t MP1Node::createGossipMessage(enum MsgTypes msgType, GossipMsgHdr **msg) {
-    vector<MemberListEntry> memberList = memberNode->memberList;
+int MP1Node::createGossipMessage(enum MsgTypes msgType, GossipMsgHdr **msg) {
+    int memberCount = 0;
 
     size_t msgheadersize = sizeof(GossipMsgHdr);
-    size_t msgsize = msgheadersize + (sizeof(MemberListEntry) * memberList.size()) + 1;
+    size_t msgsize = msgheadersize + (sizeof(MemberListEntry) * memberNode->memberList.size()) + 1;
     *msg = (GossipMsgHdr *) malloc(msgsize * sizeof(char));
 
     (*msg)->msgType = msgType;
-    (*msg)->numEntries = memberList.size();
 
-    MemberListEntry m = memberList[0];
-
-    for (int i = 0; i < memberList.size(); i++) {
-        memcpy((char *)*msg + msgheadersize + (i * sizeof(MemberListEntry)), &memberList[i], sizeof(MemberListEntry));
+    for (int i = 0; i < memberNode->memberList.size(); i++) {
+        // only gossip about non-faulty members
+        if (i == 0 || !hasFailed(memberNode->memberList[i])) {
+            memcpy((char *)*msg + msgheadersize + (memberCount * sizeof(MemberListEntry)), &(memberNode->memberList[i]), sizeof(MemberListEntry));
+            memberCount++;
+        }
     }
+
+    (*msg)->numEntries = memberCount;
 
     return msgsize;
 }
@@ -390,22 +393,43 @@ void MP1Node::unpackMessage(GossipMsgHdr *gossipMessage, vector<MemberListEntry>
 void MP1Node::mergeLists(vector<MemberListEntry> *newMemberList) {
     // for each entry in new list
     for (int i = 0; i < newMemberList->size(); i++) {
+        bool found = false;
         for (int j = 0; j < memberNode->memberList.size(); j++) {
-            // if we do have entry, check if new heartbeat > our heartbeat, 
+            // if we have entry, check if new heartbeat > our heartbeat, 
             // in which case we should update our entry 
             if (memberNode->memberList[j].id == (*newMemberList)[i].id && memberNode->memberList[j].port == (*newMemberList)[i].port) {
-                if ((*newMemberList)[i].heartbeat > memberNode->memberList[j].heartbeat) {
-                    memberNode->memberList[j].heartbeat = (*newMemberList)[i].heartbeat; 
+                found = true;
+                if ((*newMemberList)[i].getheartbeat() > memberNode->memberList[j].getheartbeat()) {
+                    memberNode->memberList[j].setheartbeat((*newMemberList)[i].getheartbeat());
+                    memberNode->memberList[j].settimestamp(par->getcurrtime());
                 }
                 break;
             }
         }
-        // we don't have the entry, so add it
-        memberNode->memberList.push_back((*newMemberList)[i]);
-        memberNode->memberList.back().settimestamp(par->getcurrtime());
+        // if we don't have the entry, add it
+        if (!found) {
+    #ifdef DEBUGLOG
+            Address toAddr = createAddress((*newMemberList)[i]);
+            log->logNodeAdd(&memberNode->addr, &toAddr);
+    #endif
+            memberNode->memberList.push_back((*newMemberList)[i]);
+            memberNode->memberList.back().settimestamp(par->getcurrtime());
+            memberNode->nnb++;
+        }
     }
 }
 
+bool MP1Node::hasFailed(const MemberListEntry &m) {
+    if (par->globaltime - m.timestamp > TFAIL) {
+        return true;
+    }
 
+    return false;
+}
 
+Address MP1Node::createAddress(MemberListEntry &m) {
+    string address = to_string(m.getid()) + ":" + to_string(m.getport());
+    Address toAddr = Address(address);
+    return toAddr;
+}
 
